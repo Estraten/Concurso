@@ -13,6 +13,7 @@ import {
 import { type StudyError } from './model';
 import { PageTitle, Modal, Empty } from './ui';
 import { ErrorForm } from './forms';
+import { sanitizeRichHtml } from './storage';
 import type { SharedProps } from './App';
 
 export default function Errors({ state, mutate, notify, confirm }: SharedProps) {
@@ -26,8 +27,8 @@ export default function Errors({ state, mutate, notify, confirm }: SharedProps) 
       (status === 'all' || (status === 'reviewed' ? e.reviewed : !e.reviewed)) &&
       [
         e.title,
-        e.description,
-        e.answer,
+        e.description.replace(/<[^>]*>/g, ' '),
+        e.answer.replace(/<[^>]*>/g, ' '),
         state.subjects.find((s) => s.id === e.subjectId)?.topics.find((t) => t.id === e.topicId)
           ?.name ?? '',
       ]
@@ -169,16 +170,23 @@ export default function Errors({ state, mutate, notify, confirm }: SharedProps) 
                     </div>
                   </div>
                   <h3>{item.title}</h3>
-                  {item.description && (
+                  {(item.description.replace(/<[^>]*>/g, '').trim() ||
+                    /<img\b/.test(item.description)) && (
                     <div className="error-section">
                       <small>O QUE ACONTECEU</small>
-                      <p>{item.description}</p>
+                      <div
+                        className="rich-display"
+                        dangerouslySetInnerHTML={{ __html: sanitizeRichHtml(item.description) }}
+                      />
                     </div>
                   )}
-                  {item.answer && (
+                  {(item.answer.replace(/<[^>]*>/g, '').trim() || /<img\b/.test(item.answer)) && (
                     <div className="correct-answer">
                       <small>O QUE PRECISO LEMBRAR</small>
-                      <p>{item.answer}</p>
+                      <div
+                        className="rich-display"
+                        dangerouslySetInnerHTML={{ __html: sanitizeRichHtml(item.answer) }}
+                      />
                     </div>
                   )}
                   <div className="error-card-foot">
@@ -228,6 +236,7 @@ export default function Errors({ state, mutate, notify, confirm }: SharedProps) 
       )}
       {edit && (
         <Modal
+          wide
           title={edit.item ? 'Editar erro' : 'Registrar um erro'}
           description="Não é sobre acertar sempre. É sobre aprender a cada vez."
           onClose={() => setEdit(null)}

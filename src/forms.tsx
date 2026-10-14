@@ -1,7 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { lazy, Suspense, useState, type FormEvent } from 'react';
 import { Upload, Download, Info } from 'lucide-react';
 import {
   colors,
+  addDays,
+  shortDate,
+  weekStart,
   subjectsFromCsv,
   today,
   uid,
@@ -13,7 +16,8 @@ import {
   type Note,
   type Cycle,
 } from './model';
-import { download } from './storage';
+import { download, sanitizeRichHtml } from './storage';
+const RichEditor = lazy(() => import('./Editor'));
 
 const formData = (e: FormEvent<HTMLFormElement>) => {
   e.preventDefault();
@@ -22,13 +26,21 @@ const formData = (e: FormEvent<HTMLFormElement>) => {
 const value = (data: FormData, key: string) => String(data.get(key) ?? '').trim();
 const incidenceValue = (data: FormData) =>
   value(data, 'incidence') === '' ? null : Number(value(data, 'incidence'));
-function Actions({ onClose, label = 'Salvar' }: { onClose: () => void; label?: string }) {
+function Actions({
+  onClose,
+  label = 'Salvar',
+  disabled = false,
+}: {
+  onClose: () => void;
+  label?: string;
+  disabled?: boolean;
+}) {
   return (
     <div className="form-actions">
       <button type="button" className="button" onClick={onClose}>
         Cancelar
       </button>
-      <button className="button primary" type="submit">
+      <button className="button primary" type="submit" disabled={disabled}>
         {label}
       </button>
     </div>
@@ -242,6 +254,9 @@ export function SessionForm({
   const [subjectId, setSubject] = useState(session?.subjectId ?? ''),
     [topicId, setTopic] = useState(session?.topicId ?? ''),
     [error, setError] = useState('');
+  const end = addDays(cycle.weekStart, 6),
+    future = cycle.weekStart > today(),
+    lastDate = end < today() ? end : today();
   const subjects = state.subjects.filter(
     (s) => cycle.subjects.some((c) => c.subjectId === s.id) || s.id === session?.subjectId,
   );
@@ -256,6 +271,12 @@ export function SessionForm({
           return setError('A duração deve ser de 1 minuto a 24 horas.');
         if (correct > questions)
           return setError('O número de acertos não pode superar o de questões.');
+        if (
+          value(data, 'date') < cycle.weekStart ||
+          value(data, 'date') > end ||
+          value(data, 'date') > today()
+        )
+          return setError('A data deve estar dentro da semana deste ciclo e não pode ser futura.');
         onSave({
           id: session?.id ?? uid(),
           cycleId: session?.cycleId ?? cycle.id,
@@ -287,8 +308,9 @@ export function SessionForm({
           <input
             name="date"
             type="date"
-            defaultValue={session?.date ?? today()}
-            max={today()}
+            defaultValue={session?.date ?? (future ? cycle.weekStart : lastDate)}
+            min={cycle.weekStart}
+            max={lastDate}
             required
           />
         </label>
@@ -361,7 +383,16 @@ export function SessionForm({
       <p className="form-help">
         Sessões sem questões contam para as horas, mas não entram no percentual de acertos.
       </p>
-      <Actions onClose={onClose} label="Salvar sessão" />
+      {future && (
+        <p className="form-error">
+          Esta semana ainda não começou. Você pode planejar os horários agora e registrar estudos
+          quando ela começar.
+        </p>
+      )}
+      <p className="form-help">
+        Semana do ciclo: segunda, {shortDate(cycle.weekStart)}, a domingo, {shortDate(end)}.
+      </p>
+      <Actions onClose={onClose} label="Salvar sessão" disabled={future} />
     </form>
   );
 }
@@ -377,20 +408,23 @@ export function ErrorForm({
   onClose: () => void;
 }) {
   const [subjectId, setSubject] = useState(item?.subjectId ?? ''),
-    [topicId, setTopic] = useState(item?.topicId ?? '');
+    [topicId, setTopic] = useState(item?.topicId ?? ''),
+    [description, setDescription] = useState(item?.description ?? '<p></p>'),
+    [answer, setAnswer] = useState(item?.answer ?? '<p></p>'),
+    [error, setError] = useState('');
   return (
     <form
       onSubmit={(e) => {
-        const data = formData(e);
-        const title = value(data, 'title');
+        const data = formData(e),
+          title = value(data, 'title');
         if (title)
           onSave({
             id: item?.id ?? uid(),
             subjectId,
             topicId,
             title,
-            description: value(data, 'description'),
-            answer: value(data, 'answer'),
+            description: sanitizeRichHtml(description),
+            answer: sanitizeRichHtml(answer),
             date: item?.date ?? today(),
             reviewed: item?.reviewed ?? false,
           });
@@ -415,26 +449,33 @@ export function ErrorForm({
           onTopic={setTopic}
         />
       </div>
-      <label>
-        O que aconteceu?
-        <textarea
-          name="description"
-          rows={3}
-          maxLength={10000}
-          defaultValue={item?.description}
-          placeholder="Anote a questão, a dúvida ou o motivo do erro."
-        />
-      </label>
-      <label>
-        Resposta correta / o que preciso lembrar
-        <textarea
-          name="answer"
-          rows={3}
-          maxLength={10000}
-          defaultValue={item?.answer}
-          placeholder="Explique com suas palavras para revisar depois."
-        />
-      </label>
+      <Suspense fallback={<p className="form-help">Preparando o editor de texto...</p>}>
+        <div className="rich-field">
+          <span className="field-label">O que aconteceu?</span>
+          <RichEditor
+            noteId={`${item?.id ?? 'new-error'}-description`}
+            ariaLabel="Descrição do erro"
+            html={description}
+            onChange={setDescription}
+            onError={setError}
+          />
+        </div>
+        <div className="rich-field">
+          <span className="field-label">Resposta correta / o que preciso lembrar</span>
+          <RichEditor
+            noteId={`${item?.id ?? 'new-error'}-answer`}
+            ariaLabel="Resposta correta do erro"
+            html={answer}
+            onChange={setAnswer}
+            onError={setError}
+          />
+        </div>
+      </Suspense>
+      {error && (
+        <p role="alert" className="form-error">
+          {error}
+        </p>
+      )}
       <Actions onClose={onClose} label="Salvar erro" />
     </form>
   );
@@ -491,17 +532,34 @@ export function CycleForm({
   onSave,
   onClose,
   cycle,
+  suggestedWeek = weekStart(),
+  sessions = [],
 }: {
   cycle?: Cycle;
-  onSave: (name: string) => void;
+  suggestedWeek?: string;
+  sessions?: Session[];
+  onSave: (name: string, start: string) => void;
   onClose: () => void;
 }) {
+  const [start, setStart] = useState(cycle?.weekStart ?? suggestedWeek),
+    [error, setError] = useState('');
   return (
     <form
       onSubmit={(e) => {
         const data = formData(e),
           name = value(data, 'name');
-        if (name) onSave(name);
+        if (weekStart(start) !== start)
+          return setError('Selecione uma segunda-feira para começar o ciclo.');
+        if (
+          cycle &&
+          sessions.some(
+            (s) => s.cycleId === cycle.id && (s.date < start || s.date > addDays(start, 6)),
+          )
+        )
+          return setError(
+            'Existem sessões na semana original. Crie um novo ciclo para outra semana; seus registros serão preservados.',
+          );
+        if (name) onSave(name, start);
       }}
     >
       <label>
@@ -514,11 +572,37 @@ export function CycleForm({
           required
         />
       </label>
-      <p className="form-help">
-        Um novo ciclo começa com o planejamento atual. As sessões ficam separadas por ciclo, e as
-        estatísticas podem consolidar todos eles.
-      </p>
-      <Actions onClose={onClose} label={cycle ? 'Renomear ciclo' : 'Criar ciclo'} />
+      <label>
+        Segunda-feira de início
+        <input
+          aria-label="Segunda-feira de início"
+          name="weekStart"
+          type="date"
+          min="1900-01-01"
+          step="7"
+          value={start}
+          onChange={(e) => setStart(e.target.value)}
+          required
+        />
+      </label>
+      {start && (
+        <div className="info-box">
+          <Info size={18} />
+          <p>
+            Este ciclo representa{' '}
+            <b>
+              7 dias: de segunda, {shortDate(start)}, a domingo, {shortDate(addDays(start, 6))}.
+            </b>{' '}
+            Um novo ciclo copia o planejamento, sem copiar as sessões.
+          </p>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="form-error">
+          {error}
+        </p>
+      )}
+      <Actions onClose={onClose} label={cycle ? 'Salvar ciclo' : 'Criar ciclo'} />
     </form>
   );
 }

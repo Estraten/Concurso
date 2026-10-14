@@ -9,7 +9,7 @@ import {
   ChevronLeft,
   Clock3,
 } from 'lucide-react';
-import { uid, type Note } from './model';
+import { RICH_TEXT_LIMIT, uid, type Note } from './model';
 import { downloadAttachment } from './storage';
 import { PageTitle, Modal, Empty } from './ui';
 import { NoteForm, SubjectTopicFields } from './forms';
@@ -253,8 +253,9 @@ export default function Notes({ state, mutate, notify, confirm }: SharedProps) {
                 key={note.id}
                 noteId={note.id}
                 html={note.html}
+                onError={(message) => notify(message, 'error')}
                 onChange={(html) => {
-                  if (html.length > 1000000) {
+                  if (html.length > RICH_TEXT_LIMIT) {
                     notify(
                       'Esta anotação atingiu o limite de texto. Crie outra para continuar.',
                       'error',

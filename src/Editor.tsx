@@ -4,6 +4,9 @@ import StarterKit from '@tiptap/starter-kit';
 import { TextStyleKit } from '@tiptap/extension-text-style';
 import TextAlign from '@tiptap/extension-text-align';
 import Highlight from '@tiptap/extension-highlight';
+import Image from '@tiptap/extension-image';
+import { IMAGE_SIZE_LIMIT, RICH_TEXT_LIMIT } from './model';
+import { sanitizeRichHtml } from './storage';
 import {
   Bold,
   Italic,
@@ -22,19 +25,29 @@ import {
   Redo2,
   Quote,
   RemoveFormatting,
+  ImagePlus,
 } from 'lucide-react';
 
 export default function RichEditor({
   html,
   onChange,
   noteId,
+  ariaLabel = 'Conteúdo da anotação',
+  onError,
 }: {
   html: string;
   onChange: (html: string) => void;
   noteId: string;
+  ariaLabel?: string;
+  onError?: (message: string) => void;
 }) {
   const callback = useRef(onChange);
   callback.current = onChange;
+  const errorCallback = useRef(onError);
+  errorCallback.current = onError;
+  const lastHtml = useRef(html);
+  const imageInput = useRef<HTMLInputElement>(null);
+  const pasteHandler = useRef<(files: File[], html?: string) => void>(() => {});
   const [linkOpen, setLinkOpen] = useState(false),
     [link, setLink] = useState('');
   const editor = useEditor(
@@ -45,21 +58,111 @@ export default function RichEditor({
         TextStyleKit,
         TextAlign.configure({ types: ['heading', 'paragraph'] }),
         Highlight.configure({ multicolor: true }),
+        Image.configure({ allowBase64: true }),
       ],
       content: html,
       editorProps: {
         attributes: {
           class: 'writing-area',
-          'aria-label': 'Conteúdo da anotação',
+          'aria-label': ariaLabel,
           role: 'textbox',
           'aria-multiline': 'true',
         },
+        handlePaste: (_view, event) => {
+          const files = Array.from(event.clipboardData?.items ?? [])
+            .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+            .map((item) => item.getAsFile())
+            .filter((file): file is File => !!file);
+          const pastedHtml = event.clipboardData?.getData('text/html');
+          if (files.length) {
+            event.preventDefault();
+            pasteHandler.current(files, pastedHtml);
+            return true;
+          }
+          return false;
+        },
       },
-      onUpdate: ({ editor }) => callback.current(editor.getHTML()),
+      onUpdate: ({ editor }) => {
+        const content = editor.getHTML();
+        if (content.length > RICH_TEXT_LIMIT) {
+          editor.commands.setContent(lastHtml.current, { emitUpdate: false });
+          errorCallback.current?.(
+            'Este texto atingiu o limite de 12 MB. Use outra anotação ou erro para continuar.',
+          );
+          return;
+        }
+        lastHtml.current = content;
+        callback.current(content);
+      },
     },
     [noteId],
   );
   if (!editor) return null;
+  pasteHandler.current = (files, pastedHtml) => {
+    if (files.some((file) => !/^image\/(png|jpeg|gif|webp)$/i.test(file.type))) {
+      errorCallback.current?.('Use uma imagem PNG, JPEG, GIF ou WebP.');
+      return;
+    }
+    if (files.some((file) => file.size > IMAGE_SIZE_LIMIT)) {
+      errorCallback.current?.('Cada imagem deve ter no máximo 3 MB.');
+      return;
+    }
+    if (
+      editor.getHTML().length + files.reduce((sum, f) => sum + Math.ceil((f.size * 4) / 3), 0) >
+      RICH_TEXT_LIMIT
+    ) {
+      errorCallback.current?.('As imagens ultrapassam o limite de 12 MB deste texto.');
+      return;
+    }
+    let insertion = { from: editor.state.selection.from, to: editor.state.selection.to };
+    const selection = window.getSelection();
+    if (
+      selection?.anchorNode &&
+      selection.focusNode &&
+      editor.view.dom.contains(selection.anchorNode) &&
+      editor.view.dom.contains(selection.focusNode)
+    ) {
+      const anchor = editor.view.posAtDOM(selection.anchorNode, selection.anchorOffset);
+      const focus = editor.view.posAtDOM(selection.focusNode, selection.focusOffset);
+      insertion = { from: Math.min(anchor, focus), to: Math.max(anchor, focus) };
+    }
+    if (pastedHtml) {
+      const template = document.createElement('template');
+      template.innerHTML = sanitizeRichHtml(pastedHtml);
+      template.content.querySelectorAll('img').forEach((img) => img.remove());
+      if (template.content.textContent?.trim()) {
+        editor.chain().focus().insertContentAt(insertion, template.innerHTML).run();
+        insertion = { from: editor.state.selection.from, to: editor.state.selection.to };
+      }
+    }
+    Promise.all(
+      files.map(
+        (file) =>
+          new Promise<{ src: string; alt: string }>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () =>
+              resolve({ src: String(reader.result), alt: file.name || 'Imagem colada' });
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          }),
+      ),
+    )
+      .then((images) => {
+        if (!editor.isDestroyed)
+          editor
+            .chain()
+            .focus()
+            .insertContentAt(
+              {
+                from: Math.min(insertion.from, editor.state.doc.content.size),
+                to: Math.min(insertion.to, editor.state.doc.content.size),
+              },
+              images.map((attrs) => ({ type: 'image', attrs })),
+            )
+            .run();
+      })
+      .catch(() => errorCallback.current?.('Não foi possível inserir a imagem. Tente novamente.'));
+  };
   const tool = (
     label: string,
     icon: React.ReactNode,
@@ -187,6 +290,21 @@ export default function RichEditor({
         {tool('Citação', <Quote size={17} />, editor.isActive('blockquote'), () =>
           editor.chain().focus().toggleBlockquote().run(),
         )}
+        {tool('Inserir imagem', <ImagePlus size={17} />, editor.isActive('image'), () =>
+          imageInput.current?.click(),
+        )}
+        <input
+          ref={imageInput}
+          className="visually-hidden"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          aria-label={`Inserir imagem em ${ariaLabel}`}
+          multiple
+          onChange={(e) => {
+            if (e.target.files) pasteHandler.current(Array.from(e.target.files));
+            e.target.value = '';
+          }}
+        />
         {tool('Inserir link', <Link size={17} />, editor.isActive('link'), () => {
           setLink(editor.getAttributes('link').href || '');
           setLinkOpen(!linkOpen);
@@ -217,16 +335,7 @@ export default function RichEditor({
         )}
       </div>
       {linkOpen && (
-        <form
-          className="link-entry"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (/^https?:\/\//i.test(link)) {
-              editor.chain().focus().extendMarkRange('link').setLink({ href: link }).run();
-              setLinkOpen(false);
-            }
-          }}
-        >
+        <div className="link-entry">
           <input
             type="url"
             aria-label="Endereço do link"
@@ -236,15 +345,26 @@ export default function RichEditor({
             required
             pattern="https?://.*"
           />
-          <button className="button primary small">Aplicar link</button>
+          <button
+            type="button"
+            className="button primary small"
+            onClick={() => {
+              if (/^https?:\/\//i.test(link)) {
+                editor.chain().focus().extendMarkRange('link').setLink({ href: link }).run();
+                setLinkOpen(false);
+              } else errorCallback.current?.('Informe um link começando com https:// ou http://.');
+            }}
+          >
+            Aplicar link
+          </button>
           <button type="button" className="button small" onClick={() => setLinkOpen(false)}>
             Cancelar
           </button>
-        </form>
+        </div>
       )}
       <EditorContent editor={editor} />
       <div className="editor-footer">
-        <span>Seu espaço para conectar ideias.</span>
+        <span>Cole imagens com Ctrl+V · até 3 MB por imagem.</span>
         <span>{editor.getText().length.toLocaleString('pt-BR')} caracteres</span>
       </div>
     </div>

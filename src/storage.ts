@@ -1,19 +1,40 @@
 import DOMPurify from 'dompurify';
-import { initialState, stateSchema, type State, type Note } from './model';
+import { initialState, migrateState, type State, type Note } from './model';
+
+export function sanitizeRichHtml(html: string): string {
+  const sanitized = DOMPurify.sanitize(html, {
+    ADD_ATTR: ['style'],
+    FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'svg'],
+    FORBID_ATTR: ['srcdoc'],
+  });
+  const template = document.createElement('template');
+  template.innerHTML = sanitized;
+  template.content.querySelectorAll('img').forEach((img) => {
+    if (
+      !/^(data:image\/(png|jpeg|gif|webp);base64,|https?:\/\/)/i.test(img.getAttribute('src') ?? '')
+    )
+      img.remove();
+  });
+  return template.innerHTML;
+}
 
 export function cleanNote(note: Note): Note {
   return {
     ...note,
-    html: DOMPurify.sanitize(note.html, {
-      ADD_ATTR: ['style'],
-      FORBID_TAGS: ['style', 'iframe', 'object', 'embed'],
-      FORBID_ATTR: ['srcdoc'],
-    }),
+    html: sanitizeRichHtml(note.html),
   };
 }
 export function validateState(input: unknown): State {
-  const state = stateSchema.parse(input);
-  return { ...state, notes: state.notes.map(cleanNote) };
+  const state = migrateState(input);
+  return {
+    ...state,
+    notes: state.notes.map(cleanNote),
+    errors: state.errors.map((error) => ({
+      ...error,
+      description: sanitizeRichHtml(error.description),
+      answer: sanitizeRichHtml(error.answer),
+    })),
+  };
 }
 const database = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
