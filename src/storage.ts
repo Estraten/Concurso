@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify';
-import { initialState, migrateState, type State, type Note } from './model';
+import { migrateState, type State, type Note } from './model';
+import { initialWorkspace, migrateWorkspace, type Workspace } from './contests';
 
 export function sanitizeRichHtml(html: string): string {
   const sanitized = DOMPurify.sanitize(html, {
@@ -43,7 +44,18 @@ const database = () =>
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
-export async function loadState(): Promise<State> {
+export function validateWorkspace(input: unknown): Workspace {
+  const workspace = migrateWorkspace(input);
+  return {
+    ...workspace,
+    contests: workspace.contests.map((contest) => ({
+      ...contest,
+      data: validateState(contest.data),
+    })),
+  };
+}
+
+export async function loadWorkspace(): Promise<Workspace> {
   const db = await database();
   try {
     const value = await new Promise<unknown>((resolve, reject) => {
@@ -52,17 +64,17 @@ export async function loadState(): Promise<State> {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
-    return value === undefined ? initialState() : validateState(value);
+    return value === undefined ? initialWorkspace() : validateWorkspace(value);
   } finally {
     db.close();
   }
 }
-export async function saveState(state: State) {
+export async function saveWorkspace(workspace: Workspace) {
   const db = await database();
   try {
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction('data', 'readwrite');
-      transaction.objectStore('data').put(state, 'state');
+      transaction.objectStore('data').put(workspace, 'state');
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);

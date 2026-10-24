@@ -6,7 +6,6 @@ import {
   NotebookPen,
   FileWarning,
   ChevronRight,
-  ChevronDown,
   Check,
   CheckCircle2,
   LoaderCircle,
@@ -21,7 +20,23 @@ import {
   CircleAlert,
 } from 'lucide-react';
 import { today, type State } from './model';
-import { loadState, saveState, validateState, download } from './storage';
+import {
+  loadWorkspace,
+  saveWorkspace,
+  validateState,
+  validateWorkspace,
+  download,
+} from './storage';
+import {
+  addContest,
+  selectContest,
+  updateContest,
+  inferContestCategory,
+  CONTEST_CATEGORIES,
+  type Workspace,
+  type NewContest,
+} from './contests';
+import ContestSwitcher, { NewContestForm } from './ContestSwitcher';
 import { Modal, Progress } from './ui';
 import Syllabus from './Syllabus';
 const CyclePage = lazy(() => import('./Cycle'));
@@ -47,20 +62,27 @@ const currentPage = () =>
     ? window.location.hash.slice(1)
     : 'syllabus';
 
+type RestorePayload =
+  { kind: 'workspace'; data: Workspace } | { kind: 'contest'; data: State; targetId: string };
+
 export default function App() {
-  const [state, setState] = useState<State | null>(null),
+  const [workspace, setWorkspace] = useState<Workspace | null>(null),
     [loadError, setLoadError] = useState(false),
     [saved, setSaved] = useState<'saving' | 'saved' | 'error'>('saving'),
     [page, setPage] = useState(currentPage),
     [menu, setMenu] = useState(false),
     [settings, setSettings] = useState(false),
+    [creatingContest, setCreatingContest] = useState(false),
     [toast, setToast] = useState<{ message: string; type: string } | null>(null),
     [confirmation, setConfirmation] = useState<{
       title: string;
       description: string;
       action: () => void;
     } | null>(null),
-    [restore, setRestore] = useState<State | null>(null);
+    [restore, setRestore] = useState<RestorePayload | null>(null);
+  const activeContestId = workspace?.activeContestId;
+  const currentContest = workspace?.contests.find((contest) => contest.id === activeContestId);
+  const state = currentContest?.data ?? null;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null),
     importInput = useRef<HTMLInputElement>(null),
     saveQueue = useRef<Promise<void>>(Promise.resolve()),
@@ -72,9 +94,9 @@ export default function App() {
   }, []);
   useEffect(() => {
     let active = true;
-    loadState()
+    loadWorkspace()
       .then((data) => {
-        if (active) setState(data);
+        if (active) setWorkspace(data);
       })
       .catch(() => {
         if (active) setLoadError(true);
@@ -84,12 +106,12 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (!state) return;
+    if (!workspace) return;
     const current = ++revision.current;
     setSaved('saving');
     saveQueue.current = saveQueue.current
       .catch(() => {})
-      .then(() => saveState(state))
+      .then(() => saveWorkspace(workspace))
       .then(() => {
         if (current === revision.current) setSaved('saved');
       })
@@ -102,7 +124,7 @@ export default function App() {
           );
         }
       });
-  }, [state, notify]);
+  }, [workspace, notify]);
   useEffect(() => {
     const change = () => {
       setPage(currentPage());
@@ -118,8 +140,11 @@ export default function App() {
     [],
   );
   const mutate = useCallback(
-    (update: (state: State) => State) => setState((s) => (s ? update(s) : s)),
-    [],
+    (update: (state: State) => State) =>
+      setWorkspace((previous) =>
+        previous && activeContestId ? updateContest(previous, activeContestId, update) : previous,
+      ),
+    [activeContestId],
   );
   const confirm = useCallback(
     (title: string, description: string, action: () => void) =>
@@ -136,8 +161,11 @@ export default function App() {
     if (!file) return;
     try {
       if (file.size > 250 * 1024 * 1024) throw new Error('Backup maior que 250 MB.');
-      const data = validateState(JSON.parse(await file.text()));
-      setRestore(data);
+      const parsed: unknown = JSON.parse(await file.text());
+      if (parsed && typeof parsed === 'object' && 'version' in parsed && parsed.version === 3)
+        setRestore({ kind: 'workspace', data: validateWorkspace(parsed) });
+      else if (activeContestId)
+        setRestore({ kind: 'contest', data: validateState(parsed), targetId: activeContestId });
     } catch {
       notify(
         'Backup inválido. Selecione um arquivo JSON exportado pelo Aprova (até 250 MB).',
@@ -147,7 +175,7 @@ export default function App() {
       if (importInput.current) importInput.current.value = '';
     }
   }
-  if (!state)
+  if (!state || !workspace || !currentContest)
     return (
       <div className="loading-screen">
         <div className="brand-mark">
@@ -184,7 +212,7 @@ export default function App() {
   const backup = () =>
     download(
       `aprova-backup-${today()}.json`,
-      new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }),
+      new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' }),
     );
   let content: ReactNode;
   switch (page) {
@@ -222,23 +250,20 @@ export default function App() {
           </span>
         </a>
         <div className="brand-caption">SEU ESTUDO, COM DIREÇÃO</div>
-        <button
-          className="exam-switcher"
-          onClick={() => {
-            setSettings(true);
+        <ContestSwitcher
+          workspace={workspace}
+          onSelect={(id) => {
+            setWorkspace((previous) => (previous ? selectContest(previous, id) : previous));
+            setSettings(false);
+            setRestore(null);
+            setConfirmation(null);
+            navigate('syllabus');
+          }}
+          onCreate={() => {
+            setCreatingContest(true);
             setMenu(false);
           }}
-        >
-          <span className="exam-icon">
-            <ShieldCheck size={20} />
-          </span>
-          <span>
-            <small>MEU OBJETIVO</small>
-            <strong>{state.exam.split('·')[0].trim()}</strong>
-            <span>{state.exam.split('·')[1]?.trim() || 'Meu concurso'}</span>
-          </span>
-          <ChevronDown size={15} />
-        </button>
+        />
         <div className="nav-caption">MEU PLANEJAMENTO</div>
         <nav aria-label="Navegação principal">
           {navigation.map((item) => {
@@ -352,9 +377,10 @@ export default function App() {
             <div className="syllabus-warning">
               <CircleAlert size={16} />
               <span>
-                <strong>Base inicial editável.</strong> Disciplinas e tópicos sugeridos para sua
-                preparação; confira com o edital oficial. A planilha vinculada não pôde ser
-                consultada.
+                <strong>Edital deste concurso.</strong>{' '}
+                {state.subjects.length
+                  ? 'Conteúdo editável: confira as disciplinas e os tópicos com seu edital oficial.'
+                  : 'Comece adicionando disciplinas e tópicos ou importe o edital deste concurso.'}
               </span>
               <button onClick={() => setSettings(true)}>
                 Revisar
@@ -363,6 +389,7 @@ export default function App() {
             </div>
           )}
           <Suspense
+            key={workspace.activeContestId}
             fallback={
               <div className="page-loading">
                 <LoaderCircle className="spin" size={24} />
@@ -429,7 +456,29 @@ export default function App() {
               const data = new FormData(e.currentTarget),
                 exam = String(data.get('exam')).trim();
               if (exam) {
-                mutate((s) => ({ ...s, exam, syllabusVerified: data.get('verified') === 'on' }));
+                const category =
+                  CONTEST_CATEGORIES.find((category) => category === data.get('category')) ??
+                  currentContest.category;
+                setWorkspace((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        contests: previous.contests.map((contest) =>
+                          contest.id === activeContestId
+                            ? {
+                                ...contest,
+                                category,
+                                data: {
+                                  ...contest.data,
+                                  exam,
+                                  syllabusVerified: data.get('verified') === 'on',
+                                },
+                              }
+                            : contest,
+                        ),
+                      }
+                    : previous,
+                );
                 setSettings(false);
                 notify('Configurações salvas.');
               }
@@ -439,6 +488,18 @@ export default function App() {
               Concurso e cargo
               <input name="exam" maxLength={500} defaultValue={state.exam} required />
             </label>
+            <label>
+              Tipo de concurso
+              <select
+                name="category"
+                aria-label="Tipo de concurso"
+                defaultValue={currentContest.category}
+              >
+                {CONTEST_CATEGORIES.map((category) => (
+                  <option key={category}>{category}</option>
+                ))}
+              </select>
+            </label>
             <label className="check-label verify-label">
               <input type="checkbox" name="verified" defaultChecked={state.syllabusVerified} />
               <span>Conferi as disciplinas e os tópicos com meu edital oficial.</span>
@@ -447,8 +508,9 @@ export default function App() {
               <ShieldCheck size={21} />
               <p>
                 Os dados e anexos ficam neste navegador, sem conta ou sincronização entre
-                dispositivos. O backup JSON inclui seu edital, ciclos, sessões, erros, anotações e
-                arquivos. Mantenha uma cópia segura.
+                dispositivos. Cada concurso possui seu próprio edital, ciclos, estudos, erros e
+                anotações. O backup JSON inclui todos os seus concursos e arquivos. Mantenha uma
+                cópia segura.
               </p>
             </div>
             <div className="backup-actions">
@@ -477,24 +539,60 @@ export default function App() {
           </form>
         </Modal>
       )}
+      {creatingContest && (
+        <Modal
+          title="Criar novo concurso"
+          description="Escolha seu próximo objetivo. Cada concurso terá seu próprio espaço de estudos."
+          onClose={() => setCreatingContest(false)}
+        >
+          <NewContestForm
+            canCopy={state.subjects.length > 0}
+            onClose={() => setCreatingContest(false)}
+            onSave={(input: NewContest) => {
+              if (workspace.contests.length >= 100) throw new Error('O limite é de 100 concursos.');
+              setWorkspace((previous) => (previous ? addContest(previous, input) : previous));
+              setCreatingContest(false);
+              navigate('syllabus');
+              notify('Concurso criado. Adicione ou importe o edital para começar.');
+            }}
+          />
+        </Modal>
+      )}
       {restore && (
         <Modal
           title="Restaurar seu backup?"
-          description="Confira os registros que serão recuperados."
+          description="Confira quais concursos e registros serão recuperados."
           onClose={() => setRestore(null)}
         >
           <div className="restore-summary">
-            <strong>{restore.exam}</strong>
-            <span>
-              {restore.subjects.length} disciplinas · {restore.sessions.length} sessões
-            </span>
-            <span>
-              {restore.errors.length} erros · {restore.notes.length} anotações
-            </span>
+            {restore.kind === 'workspace' ? (
+              <>
+                <strong>{restore.data.contests.length} concursos no backup</strong>
+                {restore.data.contests.map((contest) => (
+                  <span key={contest.id}>
+                    {contest.data.exam} · {contest.data.sessions.length} sessões ·{' '}
+                    {contest.data.notes.length} anotações
+                  </span>
+                ))}
+              </>
+            ) : (
+              <>
+                <strong>{restore.data.exam}</strong>
+                <span>
+                  {restore.data.subjects.length} disciplinas · {restore.data.sessions.length}{' '}
+                  sessões
+                </span>
+                <span>
+                  {restore.data.errors.length} erros · {restore.data.notes.length} anotações
+                </span>
+              </>
+            )}
           </div>
           <p className="danger-box">
-            Todos os registros atuais deste navegador serão substituídos, incluindo anexos. Exporte
-            um backup dos dados atuais antes de continuar.
+            {restore.kind === 'workspace'
+              ? 'Este backup substitui todos os concursos e registros deste navegador, incluindo anexos.'
+              : `Este backup antigo substitui somente o concurso “${workspace.contests.find((contest) => contest.id === restore.targetId)?.data.exam ?? state.exam}”. Os outros concursos serão mantidos.`}{' '}
+            Exporte um backup atual antes de continuar.
           </p>
           <button className="button small" onClick={backup}>
             <Download size={15} />
@@ -507,7 +605,30 @@ export default function App() {
             <button
               className="button primary"
               onClick={() => {
-                setState(restore);
+                if (restore.kind === 'workspace') setWorkspace(restore.data);
+                else {
+                  const { data, targetId } = restore;
+                  setWorkspace((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          activeContestId: targetId,
+                          contests: previous.contests.map((contest) =>
+                            contest.id === targetId
+                              ? {
+                                  ...contest,
+                                  category:
+                                    contest.data.exam === data.exam
+                                      ? contest.category
+                                      : inferContestCategory(data.exam),
+                                  data,
+                                }
+                              : contest,
+                          ),
+                        }
+                      : previous,
+                  );
+                }
                 setRestore(null);
                 navigate('syllabus');
                 notify('Backup restaurado.');
